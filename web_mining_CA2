@@ -1,0 +1,164 @@
+# ============================================
+# Web Usage Mining Project
+# Subject: Data Warehousing and Data Mining
+# Course Code: PECIT602B
+# ============================================
+
+import pandas as pd
+import numpy as np
+import re
+from datetime import datetime, timedelta
+from sklearn.cluster import KMeans
+from sklearn.preprocessing import LabelEncoder
+from sklearn.tree import DecisionTreeClassifier
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import accuracy_score
+from mlxtend.frequent_patterns import apriori, association_rules
+
+# ============================================
+# 1. LOAD DATASET (NASA Web Log Format)
+# ============================================
+
+# Replace with your dataset path
+file_path = "access_log.txt"
+
+log_pattern = re.compile(
+    r'(\S+) - - \[(.*?)\] "(.*?)" (\d{3}) (\S+)'
+)
+
+data = []
+
+with open(file_path, "r", encoding="latin1") as file:
+    for line in file:
+        match = log_pattern.match(line)
+        if match:
+            ip, time, request, status, size = match.groups()
+            data.append([ip, time, request, status, size])
+
+df = pd.DataFrame(data, columns=["IP", "Time", "Request", "Status", "Size"])
+
+print("Dataset Loaded Successfully")
+print("Total Records:", len(df))
+
+# ============================================
+# 2. DATA PREPROCESSING
+# ============================================
+
+# Convert Time to datetime
+df["Time"] = pd.to_datetime(df["Time"], format="%d/%b/%Y:%H:%M:%S %z")
+
+# Extract URL from request
+df["URL"] = df["Request"].apply(lambda x: x.split(" ")[1] if len(x.split(" ")) > 1 else None)
+
+# Remove image/css/js files
+df = df[~df["URL"].str.contains(".jpg|.gif|.png|.css|.js", na=False)]
+
+# Convert Size to numeric
+df["Size"] = pd.to_numeric(df["Size"], errors="coerce")
+df["Size"] = df["Size"].fillna(0)
+
+print("After Cleaning:", len(df))
+
+# ============================================
+# 3. SESSION IDENTIFICATION (30 min timeout)
+# ============================================
+
+df = df.sort_values(by=["IP", "Time"])
+
+session_timeout = timedelta(minutes=30)
+df["Session"] = 0
+
+session_id = 0
+prev_ip = None
+prev_time = None
+
+for index, row in df.iterrows():
+    if row["IP"] != prev_ip or (prev_time and row["Time"] - prev_time > session_timeout):
+        session_id += 1
+    df.at[index, "Session"] = session_id
+    prev_ip = row["IP"]
+    prev_time = row["Time"]
+
+print("Total Sessions:", df["Session"].nunique())
+
+# ============================================
+# 4. FEATURE ENGINEERING
+# ============================================
+
+session_data = df.groupby("Session").agg({
+    "IP": "first",
+    "URL": "count",
+    "Size": "sum"
+}).reset_index()
+
+session_data.columns = ["Session", "IP", "Page_Visits", "Total_Bytes"]
+
+print(session_data.head())
+
+# ============================================
+# 5. K-MEANS CLUSTERING
+# ============================================
+
+X = session_data[["Page_Visits", "Total_Bytes"]]
+
+kmeans = KMeans(n_clusters=3, random_state=42)
+session_data["Cluster"] = kmeans.fit_predict(X)
+
+print("Clustering Completed")
+print(session_data["Cluster"].value_counts())
+
+# ============================================
+# 6. CLASSIFICATION (Decision Tree)
+# ============================================
+
+# Label Encoding IP
+le = LabelEncoder()
+session_data["IP_encoded"] = le.fit_transform(session_data["IP"])
+
+features = session_data[["Page_Visits", "Total_Bytes", "IP_encoded"]]
+target = session_data["Cluster"]
+
+X_train, X_test, y_train, y_test = train_test_split(
+    features, target, test_size=0.3, random_state=42
+)
+
+clf = DecisionTreeClassifier()
+clf.fit(X_train, y_train)
+
+y_pred = clf.predict(X_test)
+
+accuracy = accuracy_score(y_test, y_pred)
+print("Classification Accuracy:", round(accuracy * 100, 2), "%")
+
+# ============================================
+# 7. ASSOCIATION RULE MINING (Apriori)
+# ============================================
+
+# Create session-URL matrix
+basket = (
+    df.groupby(["Session", "URL"])["URL"]
+    .count()
+    .unstack()
+    .fillna(0)
+)
+
+# Convert to binary
+basket = basket.applymap(lambda x: 1 if x > 0 else 0)
+
+frequent_items = apriori(basket, min_support=0.01, use_colnames=True)
+
+rules = association_rules(frequent_items, metric="confidence", min_threshold=0.3)
+
+print("Top Association Rules:")
+print(rules[["antecedents", "consequents", "support", "confidence"]].head())
+
+# ============================================
+# 8. SUMMARY OUTPUT
+# ============================================
+
+print("\n========== PROJECT SUMMARY ==========")
+print("Total Users:", df["IP"].nunique())
+print("Total Sessions:", df["Session"].nunique())
+print("Clusters Formed:", session_data["Cluster"].nunique())
+print("Model Accuracy:", round(accuracy * 100, 2), "%")
+print("=====================================")
